@@ -1,0 +1,313 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates an RDS database to be used with a Prisma server.
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: 'Container Parameters'
+        Parameters:
+          - ServiceName
+          - ImageUrl
+          - ContainerPort
+          - ContainerCpu
+          - ContainerMemory
+          - DesiredCount
+      - Label:
+          default: 'Parent Stack'
+        Parameters:
+          - ParentClusterStack
+      - Label:
+          default: 'Load Balancer Parameters'
+        Parameters:
+          - AppHostname
+          - Priority
+      - Label:
+          default: 'Database Parameters'
+        Parameters:
+          - DatabaseName
+          - DatabasePassword
+          - ManagementApiSecret
+          - DatabasePort
+          - DatabaseUser
+          - DatabaseAllocatedStorage
+          - DatabaseInstanceClass
+Parameters:
+  ParentClusterStack:
+    Type: String
+    Default: vpc
+    Description: The name of the parent cluster stack that you created. Necessary
+      to locate and reference resources created by that stack.
+  ServiceName:
+    Type: String
+    Default: prisma
+    Description: The name for the service
+  ImageUrl:
+    Type: String
+    Default: prismagraphql/prisma:1.34
+    Description: The url of the prisma docker image
+  ContainerPort:
+    Type: Number
+    Default: 4466
+    Description: What port number the prisma docker container is binding to
+  ContainerCpu:
+    Type: Number
+    Default: 800
+    Description: How much CPU to give the container. 1024 is 1 CPU
+  AppHostname:
+    Type: String
+    Default: dev.prisma.techjobhunt.com
+    Description: App hostname used for load balancer traffic routing
+  ContainerMemory:
+    Type: Number
+    Default: 800
+    Description: How much memory in megabytes to give the container
+  Priority:
+    Type: Number
+    Default: 2
+    Description: The priority for the routing rule added to the load balancer.
+      This only applies if your have multiple services which have been
+      assigned to different paths on the load balancer.
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: How many copies of the service task to run
+  ManagementApiSecret:
+    Type: String
+    Default: xxxxx
+    Description: The prisma management api secret
+  DatabaseName:
+    Default: MyDatabase
+    Description: The database name
+    Type: String
+    MinLength: '1'
+    MaxLength: '64'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9-]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric
+      characters.
+  DatabasePassword:
+    Type: String
+    NoEcho: true
+    Description: The password for the database
+    MinLength: '1'
+    MaxLength: '41'
+    AllowedPattern: '[a-zA-Z0-9-]+'
+    ConstraintDescription: must contain only alphanumeric characters.
+  DatabasePort:
+    Type: String
+    Default: 3306
+    Description: The port of the MySQL database
+  DatabaseUser:
+    Type: String
+    Default: root
+    Description: The username for the MySQL database
+    MinLength: '1'
+    MaxLength: '16'
+    NoEcho: 'true'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9-]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric
+      characters.
+  DatabaseAllocatedStorage:
+    Default: '20'
+    Description: The size of the database (Gb)
+    Type: Number
+    MinValue: '20'
+    MaxValue: '1024'
+    ConstraintDescription: must be between 5 and 1024Gb.
+  DatabaseInstanceClass:
+    Description: The database instance type
+    Type: String
+    Default: db.t2.micro
+    AllowedValues:
+      [
+        db.t1.micro,
+        db.m1.small,
+        db.m1.medium,
+        db.m1.large,
+        db.m1.xlarge,
+        db.m2.xlarge,
+        db.m2.2xlarge,
+        db.m2.4xlarge,
+        db.m3.medium,
+        db.m3.large,
+        db.m3.xlarge,
+        db.m3.2xlarge,
+        db.m4.large,
+        db.m4.xlarge,
+        db.m4.2xlarge,
+        db.m4.4xlarge,
+        db.m4.10xlarge,
+        db.r3.large,
+        db.r3.xlarge,
+        db.r3.2xlarge,
+        db.r3.4xlarge,
+        db.r3.8xlarge,
+        db.m2.xlarge,
+        db.m2.2xlarge,
+        db.m2.4xlarge,
+        db.cr1.8xlarge,
+        db.t2.micro,
+        db.t2.small,
+        db.t2.medium,
+        db.t2.large,
+      ]
+    ConstraintDescription: must select a valid database instance type.
+
+Resources:
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress for database access
+      GroupId:
+        Fn::ImportValue: !Join [':', [!Ref 'ParentClusterStack', 'SecurityGroup']]
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      CidrIp: '0.0.0.0/0'
+
+  # Specifying a subnet group allows the DB to be created in the same VPC as the parent cluster stack
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Database subnet group
+      SubnetIds:
+        - Fn::ImportValue: !Join [':', [!Ref 'ParentClusterStack', 'PublicSubnetOne']]
+        - Fn::ImportValue: !Join [':', [!Ref 'ParentClusterStack', 'PublicSubnetTwo']]
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Ref DatabaseName
+      AllocatedStorage: !Ref DatabaseAllocatedStorage
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      Engine: MySQL
+      Port: !Ref DatabasePort
+      MasterUsername: !Ref DatabaseUser
+      MasterUserPassword: !Ref DatabasePassword
+      PubliclyAccessible: true
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      Tags:
+        - Key: Name
+          Value: Master Database
+      VPCSecurityGroups:
+        - Fn::ImportValue: !Join [':', [!Ref 'ParentClusterStack', 'SecurityGroup']]
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+
+  # The task definition. This is a simple metadata description of what
+  # container to run, and what resource requirements it has.
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref 'ServiceName'
+      Cpu: !Ref 'ContainerCpu'
+      Memory: !Ref 'ContainerMemory'
+      ContainerDefinitions:
+        - Name: !Ref 'ServiceName'
+          Cpu: !Ref 'ContainerCpu'
+          Memory: !Ref 'ContainerMemory'
+          Image: !Ref 'ImageUrl'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              'awslogs-region': !Ref 'AWS::Region'
+              'awslogs-group':
+                Fn::ImportValue: !Sub '${ParentClusterStack}-LogGroup'
+              'awslogs-stream-prefix': !Ref 'AWS::StackName'
+          PortMappings:
+            - ContainerPort: !Ref 'ContainerPort'
+          Environment:
+            - Name: PRISMA_CONFIG
+              Value: !Sub |
+                managementApiSecret: ${ManagementApiSecret}
+                port: ${ContainerPort}
+                databases:
+                  default:
+                    connector: mysql
+                    migrations: true
+                    host: ${Database.Endpoint.Address}
+                    port: ${DatabasePort}
+                    user: ${DatabaseUser}
+                    password: ${DatabasePassword}
+
+  # The service. The service is a resource which allows you to run multiple
+  # copies of a type of task, and gather up their logs and metrics, as well
+  # as monitor the number of running tasks and replace any that have crashed
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - HttpsLoadBalancerRule
+      - Database
+    Properties:
+      ServiceName: !Ref 'ServiceName'
+      Cluster:
+        Fn::ImportValue: !Join [':', [!Ref 'ParentClusterStack', 'ClusterName']]
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 75
+      DesiredCount: !Ref 'DesiredCount'
+      TaskDefinition: !Ref 'TaskDefinition'
+      LoadBalancers:
+        - ContainerName: !Ref 'ServiceName'
+          ContainerPort: !Ref 'ContainerPort'
+          TargetGroupArn: !Ref 'TargetGroup'
+
+  # A target group. This is used for keeping track of all the tasks, and
+  # what IP addresses / port numbers they have. You can query it yourself,
+  # to use the addresses yourself, but most often this target group is just
+  # connected to an application load balancer, or network load balancer, so
+  # it can automatically distribute traffic across all the targets.
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Name: !Ref 'ServiceName'
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId:
+        Fn::ImportValue: !Join [':', [!Ref 'ParentClusterStack', 'VPCId']]
+
+  # Create a rule on the load balancer for routing https traffic to the target group
+  HttpsLoadBalancerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref 'TargetGroup'
+          Type: 'forward'
+      # Using the * path pattern sends all load balancer traffic to this service
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Ref AppHostname
+        - Field: path-pattern
+          Values: ['*']
+      ListenerArn:
+        Fn::ImportValue: !Join [':', [!Ref 'ParentClusterStack', 'PublicHttpsListener']]
+      Priority: !Ref 'Priority'
+
+  # Add A Record pointing to load balancer in order to access the app at it's AppHostname
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: techjobhunt.com.
+      Comment: DNS name for my instance.
+      Name: !Join ['', [!Ref 'AppHostname', .]]
+      Type: A
+      AliasTarget:
+        DNSName:
+          Fn::Select:
+            - 1
+            - Fn::Split:
+                - 'http://'
+                - Fn::ImportValue: !Join [':', [!Ref 'ParentClusterStack', 'ExternalUrl']]
+        HostedZoneId:
+          Fn::ImportValue: !Join [':', [!Ref 'ParentClusterStack', 'HostedZoneId']]
+
+Outputs:
+  DatabaseEndpoint:
+    Description: The database endpoint
+    Value: !GetAtt [Database, Endpoint.Address]
